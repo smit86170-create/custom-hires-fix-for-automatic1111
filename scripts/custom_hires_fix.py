@@ -709,6 +709,30 @@ class CustomHiresFix(scripts.Script):
                                                   value=int(self.config.get("unsharp_threshold", 0)))
 
                 with gr.Row():
+                    median_enabled = gr.Checkbox(label="Sharpen (median)",
+                                                 value=bool(self.config.get("median_enabled", False)))
+                    median_radius = gr.Slider(minimum=1, maximum=9, step=2, label="Median radius",
+                                              value=int(self.config.get("median_radius", 3)))
+                    median_amount = gr.Slider(minimum=0.0, maximum=2.0, step=0.05, label="Median amount",
+                                              value=float(self.config.get("median_amount", 0.5)))
+
+                with gr.Row():
+                    bilateral_enabled = gr.Checkbox(label="Bilateral smooth",
+                                                    value=bool(self.config.get("bilateral_enabled", False)))
+                    bilateral_diameter = gr.Slider(minimum=1, maximum=9, step=2, label="Bilateral diameter",
+                                                   value=int(self.config.get("bilateral_diameter", 5)))
+                    bilateral_sigma_color = gr.Slider(minimum=25, maximum=150, step=5, label="Sigma color",
+                                                      value=float(self.config.get("bilateral_sigma_color", 75)))
+                    bilateral_sigma_space = gr.Slider(minimum=25, maximum=150, step=5, label="Sigma space",
+                                                      value=float(self.config.get("bilateral_sigma_space", 75)))
+
+                postfx_order = gr.Dropdown(
+                    ["Match colors", "CLAHE", "Unsharp", "Sharpen (median)", "Bilateral smooth"],
+                    label="Post-FX order", multiselect=True,
+                    value=self.config.get("postfx_order", ["Match colors", "CLAHE", "Unsharp"])
+                )
+
+                with gr.Row():
                     cn_ref = gr.Checkbox(label="Use last image as ControlNet reference", value=bool(self.config.get("cn_ref", False)))
                     start_control_at = gr.Slider(minimum=0.0, maximum=0.7, step=0.01, label="CN start (enabled units)",
                                                  value=float(self.config.get("start_control_at", 0.0)))
@@ -1042,6 +1066,14 @@ class CustomHiresFix(scripts.Script):
             (unsharp_radius, lambda d: read_params(d, "unsharp_radius", 1.5)),
             (unsharp_amount, lambda d: read_params(d, "unsharp_amount", 0.75)),
             (unsharp_threshold, lambda d: read_params(d, "unsharp_threshold", 0)),
+            (median_enabled, lambda d: read_params(d, "median_enabled", False)),
+            (median_radius, lambda d: read_params(d, "median_radius", 3)),
+            (median_amount, lambda d: read_params(d, "median_amount", 0.5)),
+            (bilateral_enabled, lambda d: read_params(d, "bilateral_enabled", False)),
+            (bilateral_diameter, lambda d: read_params(d, "bilateral_diameter", 5)),
+            (bilateral_sigma_color, lambda d: read_params(d, "bilateral_sigma_color", 75)),
+            (bilateral_sigma_space, lambda d: read_params(d, "bilateral_sigma_space", 75)),
+            (postfx_order, lambda d: read_params(d, "postfx_order", ["Match colors", "CLAHE", "Unsharp"])),
             (cn_ref, lambda d: read_params(d, "cn_ref", False)),
             (start_control_at, lambda d: read_params(d, "start_control_at", 0.0)),
             (cn_proc_res_cap, lambda d: read_params(d, "cn_proc_res_cap", 1024)),
@@ -1090,6 +1122,9 @@ class CustomHiresFix(scripts.Script):
             match_colors_preset, match_colors_enabled, match_colors_strength,
             postfx_preset, clahe_enabled, clahe_clip, clahe_tile_grid,
             unsharp_enabled, unsharp_radius, unsharp_amount, unsharp_threshold,
+            median_enabled, median_radius, median_amount,
+            bilateral_enabled, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space,
+            postfx_order,
             cn_ref, start_control_at, cn_proc_res_cap,
             # final upscale
             final_upscale_enable, final_upscaler, final_scale, final_tile, final_tile_overlap,
@@ -1271,6 +1306,14 @@ class CustomHiresFix(scripts.Script):
             "unsharp_radius": float(self.config.get("unsharp_radius", 1.5)),
             "unsharp_amount": float(self.config.get("unsharp_amount", 0.75)),
             "unsharp_threshold": int(self.config.get("unsharp_threshold", 0)),
+            "median_enabled": bool(self.config.get("median_enabled", False)),
+            "median_radius": int(self.config.get("median_radius", 3)),
+            "median_amount": float(self.config.get("median_amount", 0.5)),
+            "bilateral_enabled": bool(self.config.get("bilateral_enabled", False)),
+            "bilateral_diameter": int(self.config.get("bilateral_diameter", 5)),
+            "bilateral_sigma_color": float(self.config.get("bilateral_sigma_color", 75)),
+            "bilateral_sigma_space": float(self.config.get("bilateral_sigma_space", 75)),
+            "postfx_order": list(self.config.get("postfx_order", ["Match colors", "CLAHE", "Unsharp"])),
             "cn_ref": bool(self.config.get("cn_ref", False)),
             "start_control_at": float(self.config.get("start_control_at", 0.0)),
             "cn_proc_res_cap": int(self.config.get("cn_proc_res_cap", 1024)),
@@ -1319,6 +1362,9 @@ class CustomHiresFix(scripts.Script):
                           match_colors_preset, match_colors_enabled, match_colors_strength,
                           postfx_preset, clahe_enabled, clahe_clip, clahe_tile_grid,
                           unsharp_enabled, unsharp_radius, unsharp_amount, unsharp_threshold,
+                          median_enabled, median_radius, median_amount,
+                          bilateral_enabled, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space,
+                          postfx_order,
                           cn_ref, start_control_at, cn_proc_res_cap,
                           final_upscale_enable, final_upscaler, final_scale, final_tile, final_tile_overlap,
                           # NEW из UI
@@ -1400,6 +1446,14 @@ class CustomHiresFix(scripts.Script):
         self.config["unsharp_radius"] = float(unsharp_radius)
         self.config["unsharp_amount"] = float(unsharp_amount)
         self.config["unsharp_threshold"] = int(unsharp_threshold)
+        self.config["median_enabled"] = bool(median_enabled)
+        self.config["median_radius"] = int(median_radius)
+        self.config["median_amount"] = float(median_amount)
+        self.config["bilateral_enabled"] = bool(bilateral_enabled)
+        self.config["bilateral_diameter"] = int(bilateral_diameter)
+        self.config["bilateral_sigma_color"] = float(bilateral_sigma_color)
+        self.config["bilateral_sigma_space"] = float(bilateral_sigma_space)
+        self.config["postfx_order"] = list(postfx_order)
         self.config["cn_ref"] = bool(cn_ref)
         self.config["start_control_at"] = float(start_control_at)
         self.config["cn_proc_res_cap"] = int(cn_proc_res_cap)
@@ -2003,7 +2057,36 @@ class CustomHiresFix(scripts.Script):
         amount = float(self.config.get("unsharp_amount", 0.75))
         threshold = int(self.config.get("unsharp_threshold", 0))
         return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=int(amount * 100), threshold=threshold))
-    
+
+    def _apply_sharpen_median(self, img: Image.Image) -> Image.Image:
+        if not bool(self.config.get("median_enabled", False)):
+            return img
+        try:
+            radius = int(self.config.get("median_radius", 3))
+            radius = max(1, radius | 1)
+            amount = float(self.config.get("median_amount", 0.5))
+            np_img = np.array(img)
+            blurred = cv2.medianBlur(np_img, radius)
+            sharp = cv2.addWeighted(np_img, 1 + amount, blurred, -amount, 0)
+            return Image.fromarray(np.clip(sharp, 0, 255).astype(np.uint8))
+        except Exception as e:
+            logger.warning(e)
+            return img
+
+    def _apply_bilateral_smooth(self, img: Image.Image) -> Image.Image:
+        if not bool(self.config.get("bilateral_enabled", False)):
+            return img
+        try:
+            d = int(self.config.get("bilateral_diameter", 5))
+            sigma_color = float(self.config.get("bilateral_sigma_color", 75))
+            sigma_space = float(self.config.get("bilateral_sigma_space", 75))
+            np_img = np.array(img)
+            out = cv2.bilateralFilter(np_img, d, sigma_color, sigma_space)
+            return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+        except Exception as e:
+            logger.warning(e)
+            return img
+
     def _apply_match_colors(self, img: Image.Image, ref: Image.Image) -> Image.Image:
         if not bool(self.config.get("match_colors_enabled", False)):
             return img
@@ -2630,13 +2713,20 @@ class CustomHiresFix(scripts.Script):
         x_np = 255.0 * np.moveaxis(decoded_sample.to(torch.float32).cpu().numpy(), 0, 2)
         out_img = Image.fromarray(x_np.astype(np.uint8))
     
-        # Post-FX (более предсказуемый порядок):
-        # Match colors → CLAHE → Unsharp
-        if bool(self.config.get("match_colors_enabled", False)):
-            out_img = self._apply_match_colors(out_img, self.pp.image)
-        out_img = self._apply_clahe(out_img)
-        out_img = self._apply_unsharp(out_img)
-    
+        # Post-FX with configurable order
+        order = self.config.get("postfx_order") or ["Match colors", "CLAHE", "Unsharp"]
+        for fx in order:
+            if fx == "Match colors":
+                out_img = self._apply_match_colors(out_img, self.pp.image)
+            elif fx == "CLAHE":
+                out_img = self._apply_clahe(out_img)
+            elif fx == "Unsharp":
+                out_img = self._apply_unsharp(out_img)
+            elif fx == "Sharpen (median)":
+                out_img = self._apply_sharpen_median(out_img)
+            elif fx == "Bilateral smooth":
+                out_img = self._apply_bilateral_smooth(out_img)
+
         return out_img
     
     def _final_upscale_tiled(self, img: Image.Image, scale: float) -> Image.Image:
@@ -2956,6 +3046,14 @@ def parse_infotext(infotext, params):
         data.setdefault("unsharp_radius", 1.5)
         data.setdefault("unsharp_amount", 0.75)
         data.setdefault("unsharp_threshold", 0)
+        data.setdefault("median_enabled", False)
+        data.setdefault("median_radius", 3)
+        data.setdefault("median_amount", 0.5)
+        data.setdefault("bilateral_enabled", False)
+        data.setdefault("bilateral_diameter", 5)
+        data.setdefault("bilateral_sigma_color", 75)
+        data.setdefault("bilateral_sigma_space", 75)
+        data.setdefault("postfx_order", ["Match colors", "CLAHE", "Unsharp"])
         data.setdefault("second_pass_prompt", "")
         data.setdefault("second_pass_prompt_append", True)
         data.setdefault("cn_proc_res_cap", 1024)
