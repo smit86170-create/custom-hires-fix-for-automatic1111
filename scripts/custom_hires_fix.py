@@ -188,23 +188,24 @@ class CustomHiresFix(scripts.Script):
             pass
         return None
 
-    def _interp(self, *args, _default_mode: str = "bicubic", **kwargs):
+    def _interp(self, *args, _default_mode: str = "bicubic", _config_mode_key: str = "latent_resample_mode_first", **kwargs):
         """Config-driven interpolate with runtime fallbacks."""
         import torch.nn.functional as F
-        if self._latent_resample_enabled():
-            label = str(self.config.get("latent_resample_mode", _default_mode))
-            mode, antialias = self._parse_interpolate_mode(label)
-            kwargs["mode"] = mode
-            # Set align_corners only for linear/bilinear/bicubic/trilinear families
-            if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
-                kwargs.setdefault("align_corners", False)
-            else:
-                kwargs.pop("align_corners", None)
-            # antialias valid only for linear/bilinear/bicubic/trilinear
-            if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
-                kwargs["antialias"] = antialias
-            else:
-                kwargs.pop("antialias", None)
+        label = str(self.config.get(_config_mode_key, _default_mode))
+        if not self._latent_resample_enabled(label):
+            label = _default_mode
+        mode, antialias = self._parse_interpolate_mode(label)
+        kwargs["mode"] = mode
+        # Set align_corners only for linear/bilinear/bicubic/trilinear families
+        if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
+            kwargs.setdefault("align_corners", False)
+        else:
+            kwargs.pop("align_corners", None)
+        # antialias valid only for linear/bilinear/bicubic/trilinear
+        if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
+            kwargs["antialias"] = antialias
+        else:
+            kwargs.pop("antialias", None)
         try:
             return F.interpolate(*args, **kwargs)
         except Exception as e:
@@ -534,9 +535,19 @@ class CustomHiresFix(scripts.Script):
             # Режим ресемпла латента
             with gr.Row():
                 latent_resample_enable = gr.Checkbox(label="Latent resample enable", value=bool(self.config.get("latent_resample_enable", True)))
-                latent_resample_mode = gr.Dropdown(["Disabled", "nearest", "nearest-exact", "bilinear", "bicubic", "area", "bilinear-antialiased", "bicubic-antialiased"],
-                    label="Latent resample mode",
-                    value=self.config.get("latent_resample_mode", "nearest")
+                latent_resample_mode_first = gr.Dropdown([
+                    "Disabled", "nearest", "nearest-exact", "bilinear", "bicubic", "lanczos", "area",
+                    "bilinear-antialiased", "bicubic-antialiased", "area-antialiased"
+                ],
+                    label="Latent resample (1st pass)",
+                    value=self.config.get("latent_resample_mode_first", "nearest")
+                )
+                latent_resample_mode_second = gr.Dropdown([
+                    "Disabled", "nearest", "nearest-exact", "bilinear", "bicubic", "lanczos", "area",
+                    "bilinear-antialiased", "bicubic-antialiased", "area-antialiased"
+                ],
+                    label="Latent resample (2nd pass)",
+                    value=self.config.get("latent_resample_mode_second", "nearest")
                 )
 
             with gr.Row():
@@ -982,7 +993,8 @@ class CustomHiresFix(scripts.Script):
             (second_upscaler, lambda d: read_params(d, "second_upscaler")),
             (first_latent, lambda d: read_params(d, "first_latent", 0.0)),
             (second_latent, lambda d: read_params(d, "second_latent", 0.0)),
-            (latent_resample_mode, lambda d: read_params(d, "latent_resample_mode", "nearest")),
+            (latent_resample_mode_first, lambda d: read_params(d, "latent_resample_mode_first", read_params(d, "latent_resample_mode", "nearest"))),
+            (latent_resample_mode_second, lambda d: read_params(d, "latent_resample_mode_second", read_params(d, "latent_resample_mode", "nearest"))),
             (latent_resample_enable, lambda d: read_params(d, "latent_resample_enable", True)),
             
             (prompt, lambda d: read_params(d, "prompt", "")),
@@ -1062,7 +1074,7 @@ class CustomHiresFix(scripts.Script):
             ratio, width, height, long_edge,
             steps_first, steps_second, denoise_first, denoise_second,
             first_upscaler, second_upscaler, first_latent, second_latent,
-            latent_resample_mode,
+            latent_resample_mode_first, latent_resample_mode_second,
             latent_resample_enable,
             prompt, negative_prompt, second_pass_prompt, second_pass_prompt_append,
             strength, filter_mode, filter_offset, denoise_offset, adaptive_sigma_enable,
@@ -1102,28 +1114,26 @@ class CustomHiresFix(scripts.Script):
         """
         Преобразует подпись из UI в аргументы torch.nn.functional.interpolate:
         (mode, antialias). Поддерживает: "nearest", "nearest-exact", "bilinear",
-        "bicubic", "area", а также "bilinear-antialiased"/"bicubic-antialiased".
+        "bicubic", "lanczos", "area" и варианты с суффиксом "-antialiased".
         Для старых torch, где "nearest-exact" недоступен, _interp уже содержит фолбэк.
         """
         try:
             lab = str(label or "").strip().lower()
-            if lab.endswith("-antialiased"):
-                base = lab.replace("-antialiased", "")
-                if base in ("bilinear", "bicubic"):
-                    return base, True
-            if lab in ("nearest", "nearest-exact", "bilinear", "bicubic", "area"):
-                return lab, False
-            return "bicubic", True
+            aa = lab.endswith("-antialiased")
+            if aa:
+                lab = lab.replace("-antialiased", "")
+            if lab in ("nearest", "nearest-exact", "bilinear", "bicubic", "lanczos", "area"):
+                return lab, aa
+            return "bicubic", aa
         except Exception:
             return "bicubic", True
 
-    def _latent_resample_enabled(self) -> bool:
+    def _latent_resample_enabled(self, mode_label: str) -> bool:
         """
         Включено ли ресемплирование латента согласно конфигу.
         Отключается, если выбран режим 'Disabled'.
         """
-        mode = str(self.config.get("latent_resample_mode", "bicubic")).lower()
-        return bool(self.config.get("latent_resample_enable", True)) and mode != "disabled"
+        return bool(self.config.get("latent_resample_enable", True)) and str(mode_label).lower() != "disabled"
 
 
     def process(self, p, *args, **kwargs):
@@ -1221,7 +1231,8 @@ class CustomHiresFix(scripts.Script):
             "filter_mode": self.config.get("filter_mode", ""),
             "filter_offset": float(self.config.get("filter_offset", 0.0)),
             "denoise_offset": float(self.config.get("denoise_offset", 0.05)),
-            "latent_resample_mode": self.config.get("latent_resample_mode", "nearest"),
+            "latent_resample_mode_first": self.config.get("latent_resample_mode_first", "nearest"),
+            "latent_resample_mode_second": self.config.get("latent_resample_mode_second", "nearest"),
             "latent_resample_enable": bool(self.config.get("latent_resample_enable", True)),
             "noise_schedule_mode": self.config.get("noise_schedule_mode", "Use sampler default"),
             "adaptive_sigma_enable": bool(self.config.get("adaptive_sigma_enable", False)),
@@ -1292,7 +1303,7 @@ class CustomHiresFix(scripts.Script):
                           ratio, width, height, long_edge,
                           steps_first, steps_second, denoise_first, denoise_second,
                           first_upscaler, second_upscaler, first_latent, second_latent,
-                          latent_resample_mode,
+                          latent_resample_mode_first, latent_resample_mode_second,
                           latent_resample_enable,
                           prompt, negative_prompt, second_pass_prompt, second_pass_prompt_append,
                           strength, filter_mode, filter_offset, denoise_offset, adaptive_sigma_enable,
@@ -1350,7 +1361,8 @@ class CustomHiresFix(scripts.Script):
         self.config["filter_mode"] = filter_mode
         self.config["filter_offset"] = float(filter_offset)
         self.config["denoise_offset"] = float(denoise_offset)
-        self.config["latent_resample_mode"] = str(latent_resample_mode)
+        self.config["latent_resample_mode_first"] = str(latent_resample_mode_first)
+        self.config["latent_resample_mode_second"] = str(latent_resample_mode_second)
         self.config["noise_schedule_mode"] = str(noise_schedule_mode)
         self.config["adaptive_sigma_enable"] = bool(adaptive_sigma_enable)
         # per-pass sampler/scheduler
@@ -2259,7 +2271,7 @@ class CustomHiresFix(scripts.Script):
         factor = self._vae_down_factor()
         x_latent = self._interp(
             sample_orig, size=(self.height // factor, self.width // factor),
-            _default_mode="nearest"
+            _default_mode="nearest", _config_mode_key="latent_resample_mode_first"
         )
     
         # NEW: Anti-twinning latent shrink/expand (опционально)
@@ -2273,8 +2285,8 @@ class CustomHiresFix(scripts.Script):
                     sample = F.interpolate(sample, size=(sh, sw), mode="bicubic", align_corners=False, antialias=True)
                     sample = F.interpolate(sample, size=(h, w),  mode="bicubic", align_corners=False, antialias=True)
                 except TypeError:
-                    sample = self._interp(sample, size=(sh, sw), _default_mode="bicubic")
-                    sample = self._interp(sample, size=(h, w), _default_mode="bicubic")
+                    sample = self._interp(sample, size=(sh, sw), _default_mode="bicubic", _config_mode_key="latent_resample_mode_first")
+                    sample = self._interp(sample, size=(h, w), _default_mode="bicubic", _config_mode_key="latent_resample_mode_first")
     
         first_latent = float(self.config.get("first_latent", 0.3))
         if 0.0 <= first_latent <= 1.0:
@@ -2463,7 +2475,7 @@ class CustomHiresFix(scripts.Script):
             factor = self._vae_down_factor()
             x_latent = self._interp(
                 sample_from_img, size=(h // factor, w // factor),
-                _default_mode="nearest"
+                _default_mode="nearest", _config_mode_key="latent_resample_mode_second"
             )
     
         # Upscale to target and encode
@@ -2480,7 +2492,7 @@ class CustomHiresFix(scripts.Script):
             factor = self._vae_down_factor()
             tH, tW = sample.shape[-2] * factor, sample.shape[-1] * factor
             if decoded.shape[-2:] != (tH, tW):
-                decoded = (self._interp(decoded.unsqueeze(0), size=(tH, tW), _default_mode="bilinear")).squeeze(0)
+                decoded = (self._interp(decoded.unsqueeze(0), size=(tH, tW), _default_mode="bilinear", _config_mode_key="latent_resample_mode_second")).squeeze(0)
     
         image_conditioning = self.p.img2img_image_conditioning(decoded, sample)
     
@@ -2975,7 +2987,8 @@ def parse_infotext(infotext, params):
         data.setdefault("adaptive_sigma_enable", False)
         data.setdefault("restore_scheduler_after", True)
         data.setdefault("latent_resample_enable", True)
-        data.setdefault("latent_resample_mode", "nearest")
+        data.setdefault("latent_resample_mode_first", data.get("latent_resample_mode", "nearest"))
+        data.setdefault("latent_resample_mode_second", data.get("latent_resample_mode", "nearest"))
         data.setdefault("noise_schedule_mode", "Use sampler default")
 
         # безопасные дефолты для старых инфотекстов
