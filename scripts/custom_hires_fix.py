@@ -188,23 +188,24 @@ class CustomHiresFix(scripts.Script):
             pass
         return None
 
-    def _interp(self, *args, _default_mode: str = "bicubic", **kwargs):
+    def _interp(self, *args, _default_mode: str = "bicubic", _config_mode_key: str = "latent_resample_mode_first", **kwargs):
         """Config-driven interpolate with runtime fallbacks."""
         import torch.nn.functional as F
-        if self._latent_resample_enabled():
-            label = str(self.config.get("latent_resample_mode", _default_mode))
-            mode, antialias = self._parse_interpolate_mode(label)
-            kwargs["mode"] = mode
-            # Set align_corners only for linear/bilinear/bicubic/trilinear families
-            if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
-                kwargs.setdefault("align_corners", False)
-            else:
-                kwargs.pop("align_corners", None)
-            # antialias valid only for linear/bilinear/bicubic/trilinear
-            if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
-                kwargs["antialias"] = antialias
-            else:
-                kwargs.pop("antialias", None)
+        label = str(self.config.get(_config_mode_key, _default_mode))
+        if not self._latent_resample_enabled(label):
+            label = _default_mode
+        mode, antialias = self._parse_interpolate_mode(label)
+        kwargs["mode"] = mode
+        # Set align_corners only for linear/bilinear/bicubic/trilinear families
+        if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
+            kwargs.setdefault("align_corners", False)
+        else:
+            kwargs.pop("align_corners", None)
+        # antialias valid only for linear/bilinear/bicubic/trilinear
+        if mode in {"linear", "bilinear", "bicubic", "trilinear"}:
+            kwargs["antialias"] = antialias
+        else:
+            kwargs.pop("antialias", None)
         try:
             return F.interpolate(*args, **kwargs)
         except Exception as e:
@@ -534,9 +535,19 @@ class CustomHiresFix(scripts.Script):
             # Режим ресемпла латента
             with gr.Row():
                 latent_resample_enable = gr.Checkbox(label="Latent resample enable", value=bool(self.config.get("latent_resample_enable", True)))
-                latent_resample_mode = gr.Dropdown(["Disabled", "nearest", "nearest-exact", "bilinear", "bicubic", "area", "bilinear-antialiased", "bicubic-antialiased"],
-                    label="Latent resample mode",
-                    value=self.config.get("latent_resample_mode", "nearest")
+                latent_resample_mode_first = gr.Dropdown([
+                    "Disabled", "nearest", "nearest-exact", "bilinear", "bicubic", "lanczos", "area",
+                    "bilinear-antialiased", "bicubic-antialiased", "area-antialiased"
+                ],
+                    label="Latent resample (1st pass)",
+                    value=self.config.get("latent_resample_mode_first", "nearest")
+                )
+                latent_resample_mode_second = gr.Dropdown([
+                    "Disabled", "nearest", "nearest-exact", "bilinear", "bicubic", "lanczos", "area",
+                    "bilinear-antialiased", "bicubic-antialiased", "area-antialiased"
+                ],
+                    label="Latent resample (2nd pass)",
+                    value=self.config.get("latent_resample_mode_second", "nearest")
                 )
 
             with gr.Row():
@@ -696,6 +707,30 @@ class CustomHiresFix(scripts.Script):
                                                value=float(self.config.get("unsharp_amount", 0.75)))
                     unsharp_threshold = gr.Slider(minimum=0, maximum=10, step=1, label="Unsharp threshold",
                                                   value=int(self.config.get("unsharp_threshold", 0)))
+
+                with gr.Row():
+                    median_enabled = gr.Checkbox(label="Sharpen (median)",
+                                                 value=bool(self.config.get("median_enabled", False)))
+                    median_radius = gr.Slider(minimum=1, maximum=9, step=2, label="Median radius",
+                                              value=int(self.config.get("median_radius", 3)))
+                    median_amount = gr.Slider(minimum=0.0, maximum=2.0, step=0.05, label="Median amount",
+                                              value=float(self.config.get("median_amount", 0.5)))
+
+                with gr.Row():
+                    bilateral_enabled = gr.Checkbox(label="Bilateral smooth",
+                                                    value=bool(self.config.get("bilateral_enabled", False)))
+                    bilateral_diameter = gr.Slider(minimum=1, maximum=9, step=2, label="Bilateral diameter",
+                                                   value=int(self.config.get("bilateral_diameter", 5)))
+                    bilateral_sigma_color = gr.Slider(minimum=25, maximum=150, step=5, label="Sigma color",
+                                                      value=float(self.config.get("bilateral_sigma_color", 75)))
+                    bilateral_sigma_space = gr.Slider(minimum=25, maximum=150, step=5, label="Sigma space",
+                                                      value=float(self.config.get("bilateral_sigma_space", 75)))
+
+                postfx_order = gr.Dropdown(
+                    ["Match colors", "CLAHE", "Unsharp", "Sharpen (median)", "Bilateral smooth"],
+                    label="Post-FX order", multiselect=True,
+                    value=self.config.get("postfx_order", ["Match colors", "CLAHE", "Unsharp"])
+                )
 
                 with gr.Row():
                     cn_ref = gr.Checkbox(label="Use last image as ControlNet reference", value=bool(self.config.get("cn_ref", False)))
@@ -982,7 +1017,8 @@ class CustomHiresFix(scripts.Script):
             (second_upscaler, lambda d: read_params(d, "second_upscaler")),
             (first_latent, lambda d: read_params(d, "first_latent", 0.0)),
             (second_latent, lambda d: read_params(d, "second_latent", 0.0)),
-            (latent_resample_mode, lambda d: read_params(d, "latent_resample_mode", "nearest")),
+            (latent_resample_mode_first, lambda d: read_params(d, "latent_resample_mode_first", read_params(d, "latent_resample_mode", "nearest"))),
+            (latent_resample_mode_second, lambda d: read_params(d, "latent_resample_mode_second", read_params(d, "latent_resample_mode", "nearest"))),
             (latent_resample_enable, lambda d: read_params(d, "latent_resample_enable", True)),
             
             (prompt, lambda d: read_params(d, "prompt", "")),
@@ -1030,6 +1066,14 @@ class CustomHiresFix(scripts.Script):
             (unsharp_radius, lambda d: read_params(d, "unsharp_radius", 1.5)),
             (unsharp_amount, lambda d: read_params(d, "unsharp_amount", 0.75)),
             (unsharp_threshold, lambda d: read_params(d, "unsharp_threshold", 0)),
+            (median_enabled, lambda d: read_params(d, "median_enabled", False)),
+            (median_radius, lambda d: read_params(d, "median_radius", 3)),
+            (median_amount, lambda d: read_params(d, "median_amount", 0.5)),
+            (bilateral_enabled, lambda d: read_params(d, "bilateral_enabled", False)),
+            (bilateral_diameter, lambda d: read_params(d, "bilateral_diameter", 5)),
+            (bilateral_sigma_color, lambda d: read_params(d, "bilateral_sigma_color", 75)),
+            (bilateral_sigma_space, lambda d: read_params(d, "bilateral_sigma_space", 75)),
+            (postfx_order, lambda d: read_params(d, "postfx_order", ["Match colors", "CLAHE", "Unsharp"])),
             (cn_ref, lambda d: read_params(d, "cn_ref", False)),
             (start_control_at, lambda d: read_params(d, "start_control_at", 0.0)),
             (cn_proc_res_cap, lambda d: read_params(d, "cn_proc_res_cap", 1024)),
@@ -1062,7 +1106,7 @@ class CustomHiresFix(scripts.Script):
             ratio, width, height, long_edge,
             steps_first, steps_second, denoise_first, denoise_second,
             first_upscaler, second_upscaler, first_latent, second_latent,
-            latent_resample_mode,
+            latent_resample_mode_first, latent_resample_mode_second,
             latent_resample_enable,
             prompt, negative_prompt, second_pass_prompt, second_pass_prompt_append,
             strength, filter_mode, filter_offset, denoise_offset, adaptive_sigma_enable,
@@ -1078,6 +1122,9 @@ class CustomHiresFix(scripts.Script):
             match_colors_preset, match_colors_enabled, match_colors_strength,
             postfx_preset, clahe_enabled, clahe_clip, clahe_tile_grid,
             unsharp_enabled, unsharp_radius, unsharp_amount, unsharp_threshold,
+            median_enabled, median_radius, median_amount,
+            bilateral_enabled, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space,
+            postfx_order,
             cn_ref, start_control_at, cn_proc_res_cap,
             # final upscale
             final_upscale_enable, final_upscaler, final_scale, final_tile, final_tile_overlap,
@@ -1102,28 +1149,26 @@ class CustomHiresFix(scripts.Script):
         """
         Преобразует подпись из UI в аргументы torch.nn.functional.interpolate:
         (mode, antialias). Поддерживает: "nearest", "nearest-exact", "bilinear",
-        "bicubic", "area", а также "bilinear-antialiased"/"bicubic-antialiased".
+        "bicubic", "lanczos", "area" и варианты с суффиксом "-antialiased".
         Для старых torch, где "nearest-exact" недоступен, _interp уже содержит фолбэк.
         """
         try:
             lab = str(label or "").strip().lower()
-            if lab.endswith("-antialiased"):
-                base = lab.replace("-antialiased", "")
-                if base in ("bilinear", "bicubic"):
-                    return base, True
-            if lab in ("nearest", "nearest-exact", "bilinear", "bicubic", "area"):
-                return lab, False
-            return "bicubic", True
+            aa = lab.endswith("-antialiased")
+            if aa:
+                lab = lab.replace("-antialiased", "")
+            if lab in ("nearest", "nearest-exact", "bilinear", "bicubic", "lanczos", "area"):
+                return lab, aa
+            return "bicubic", aa
         except Exception:
             return "bicubic", True
 
-    def _latent_resample_enabled(self) -> bool:
+    def _latent_resample_enabled(self, mode_label: str) -> bool:
         """
         Включено ли ресемплирование латента согласно конфигу.
         Отключается, если выбран режим 'Disabled'.
         """
-        mode = str(self.config.get("latent_resample_mode", "bicubic")).lower()
-        return bool(self.config.get("latent_resample_enable", True)) and mode != "disabled"
+        return bool(self.config.get("latent_resample_enable", True)) and str(mode_label).lower() != "disabled"
 
 
     def process(self, p, *args, **kwargs):
@@ -1221,7 +1266,8 @@ class CustomHiresFix(scripts.Script):
             "filter_mode": self.config.get("filter_mode", ""),
             "filter_offset": float(self.config.get("filter_offset", 0.0)),
             "denoise_offset": float(self.config.get("denoise_offset", 0.05)),
-            "latent_resample_mode": self.config.get("latent_resample_mode", "nearest"),
+            "latent_resample_mode_first": self.config.get("latent_resample_mode_first", "nearest"),
+            "latent_resample_mode_second": self.config.get("latent_resample_mode_second", "nearest"),
             "latent_resample_enable": bool(self.config.get("latent_resample_enable", True)),
             "noise_schedule_mode": self.config.get("noise_schedule_mode", "Use sampler default"),
             "adaptive_sigma_enable": bool(self.config.get("adaptive_sigma_enable", False)),
@@ -1260,6 +1306,14 @@ class CustomHiresFix(scripts.Script):
             "unsharp_radius": float(self.config.get("unsharp_radius", 1.5)),
             "unsharp_amount": float(self.config.get("unsharp_amount", 0.75)),
             "unsharp_threshold": int(self.config.get("unsharp_threshold", 0)),
+            "median_enabled": bool(self.config.get("median_enabled", False)),
+            "median_radius": int(self.config.get("median_radius", 3)),
+            "median_amount": float(self.config.get("median_amount", 0.5)),
+            "bilateral_enabled": bool(self.config.get("bilateral_enabled", False)),
+            "bilateral_diameter": int(self.config.get("bilateral_diameter", 5)),
+            "bilateral_sigma_color": float(self.config.get("bilateral_sigma_color", 75)),
+            "bilateral_sigma_space": float(self.config.get("bilateral_sigma_space", 75)),
+            "postfx_order": list(self.config.get("postfx_order", ["Match colors", "CLAHE", "Unsharp"])),
             "cn_ref": bool(self.config.get("cn_ref", False)),
             "start_control_at": float(self.config.get("start_control_at", 0.0)),
             "cn_proc_res_cap": int(self.config.get("cn_proc_res_cap", 1024)),
@@ -1292,7 +1346,7 @@ class CustomHiresFix(scripts.Script):
                           ratio, width, height, long_edge,
                           steps_first, steps_second, denoise_first, denoise_second,
                           first_upscaler, second_upscaler, first_latent, second_latent,
-                          latent_resample_mode,
+                          latent_resample_mode_first, latent_resample_mode_second,
                           latent_resample_enable,
                           prompt, negative_prompt, second_pass_prompt, second_pass_prompt_append,
                           strength, filter_mode, filter_offset, denoise_offset, adaptive_sigma_enable,
@@ -1308,6 +1362,9 @@ class CustomHiresFix(scripts.Script):
                           match_colors_preset, match_colors_enabled, match_colors_strength,
                           postfx_preset, clahe_enabled, clahe_clip, clahe_tile_grid,
                           unsharp_enabled, unsharp_radius, unsharp_amount, unsharp_threshold,
+                          median_enabled, median_radius, median_amount,
+                          bilateral_enabled, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space,
+                          postfx_order,
                           cn_ref, start_control_at, cn_proc_res_cap,
                           final_upscale_enable, final_upscaler, final_scale, final_tile, final_tile_overlap,
                           # NEW из UI
@@ -1350,7 +1407,8 @@ class CustomHiresFix(scripts.Script):
         self.config["filter_mode"] = filter_mode
         self.config["filter_offset"] = float(filter_offset)
         self.config["denoise_offset"] = float(denoise_offset)
-        self.config["latent_resample_mode"] = str(latent_resample_mode)
+        self.config["latent_resample_mode_first"] = str(latent_resample_mode_first)
+        self.config["latent_resample_mode_second"] = str(latent_resample_mode_second)
         self.config["noise_schedule_mode"] = str(noise_schedule_mode)
         self.config["adaptive_sigma_enable"] = bool(adaptive_sigma_enable)
         # per-pass sampler/scheduler
@@ -1388,6 +1446,14 @@ class CustomHiresFix(scripts.Script):
         self.config["unsharp_radius"] = float(unsharp_radius)
         self.config["unsharp_amount"] = float(unsharp_amount)
         self.config["unsharp_threshold"] = int(unsharp_threshold)
+        self.config["median_enabled"] = bool(median_enabled)
+        self.config["median_radius"] = int(median_radius)
+        self.config["median_amount"] = float(median_amount)
+        self.config["bilateral_enabled"] = bool(bilateral_enabled)
+        self.config["bilateral_diameter"] = int(bilateral_diameter)
+        self.config["bilateral_sigma_color"] = float(bilateral_sigma_color)
+        self.config["bilateral_sigma_space"] = float(bilateral_sigma_space)
+        self.config["postfx_order"] = list(postfx_order)
         self.config["cn_ref"] = bool(cn_ref)
         self.config["start_control_at"] = float(start_control_at)
         self.config["cn_proc_res_cap"] = int(cn_proc_res_cap)
@@ -1991,7 +2057,36 @@ class CustomHiresFix(scripts.Script):
         amount = float(self.config.get("unsharp_amount", 0.75))
         threshold = int(self.config.get("unsharp_threshold", 0))
         return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=int(amount * 100), threshold=threshold))
-    
+
+    def _apply_sharpen_median(self, img: Image.Image) -> Image.Image:
+        if not bool(self.config.get("median_enabled", False)):
+            return img
+        try:
+            radius = int(self.config.get("median_radius", 3))
+            radius = max(1, radius | 1)
+            amount = float(self.config.get("median_amount", 0.5))
+            np_img = np.array(img)
+            blurred = cv2.medianBlur(np_img, radius)
+            sharp = cv2.addWeighted(np_img, 1 + amount, blurred, -amount, 0)
+            return Image.fromarray(np.clip(sharp, 0, 255).astype(np.uint8))
+        except Exception as e:
+            logger.warning(e)
+            return img
+
+    def _apply_bilateral_smooth(self, img: Image.Image) -> Image.Image:
+        if not bool(self.config.get("bilateral_enabled", False)):
+            return img
+        try:
+            d = int(self.config.get("bilateral_diameter", 5))
+            sigma_color = float(self.config.get("bilateral_sigma_color", 75))
+            sigma_space = float(self.config.get("bilateral_sigma_space", 75))
+            np_img = np.array(img)
+            out = cv2.bilateralFilter(np_img, d, sigma_color, sigma_space)
+            return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+        except Exception as e:
+            logger.warning(e)
+            return img
+
     def _apply_match_colors(self, img: Image.Image, ref: Image.Image) -> Image.Image:
         if not bool(self.config.get("match_colors_enabled", False)):
             return img
@@ -2259,7 +2354,7 @@ class CustomHiresFix(scripts.Script):
         factor = self._vae_down_factor()
         x_latent = self._interp(
             sample_orig, size=(self.height // factor, self.width // factor),
-            _default_mode="nearest"
+            _default_mode="nearest", _config_mode_key="latent_resample_mode_first"
         )
     
         # NEW: Anti-twinning latent shrink/expand (опционально)
@@ -2273,8 +2368,8 @@ class CustomHiresFix(scripts.Script):
                     sample = F.interpolate(sample, size=(sh, sw), mode="bicubic", align_corners=False, antialias=True)
                     sample = F.interpolate(sample, size=(h, w),  mode="bicubic", align_corners=False, antialias=True)
                 except TypeError:
-                    sample = self._interp(sample, size=(sh, sw), _default_mode="bicubic")
-                    sample = self._interp(sample, size=(h, w), _default_mode="bicubic")
+                    sample = self._interp(sample, size=(sh, sw), _default_mode="bicubic", _config_mode_key="latent_resample_mode_first")
+                    sample = self._interp(sample, size=(h, w), _default_mode="bicubic", _config_mode_key="latent_resample_mode_first")
     
         first_latent = float(self.config.get("first_latent", 0.3))
         if 0.0 <= first_latent <= 1.0:
@@ -2463,7 +2558,7 @@ class CustomHiresFix(scripts.Script):
             factor = self._vae_down_factor()
             x_latent = self._interp(
                 sample_from_img, size=(h // factor, w // factor),
-                _default_mode="nearest"
+                _default_mode="nearest", _config_mode_key="latent_resample_mode_second"
             )
     
         # Upscale to target and encode
@@ -2480,7 +2575,7 @@ class CustomHiresFix(scripts.Script):
             factor = self._vae_down_factor()
             tH, tW = sample.shape[-2] * factor, sample.shape[-1] * factor
             if decoded.shape[-2:] != (tH, tW):
-                decoded = (self._interp(decoded.unsqueeze(0), size=(tH, tW), _default_mode="bilinear")).squeeze(0)
+                decoded = (self._interp(decoded.unsqueeze(0), size=(tH, tW), _default_mode="bilinear", _config_mode_key="latent_resample_mode_second")).squeeze(0)
     
         image_conditioning = self.p.img2img_image_conditioning(decoded, sample)
     
@@ -2618,13 +2713,20 @@ class CustomHiresFix(scripts.Script):
         x_np = 255.0 * np.moveaxis(decoded_sample.to(torch.float32).cpu().numpy(), 0, 2)
         out_img = Image.fromarray(x_np.astype(np.uint8))
     
-        # Post-FX (более предсказуемый порядок):
-        # Match colors → CLAHE → Unsharp
-        if bool(self.config.get("match_colors_enabled", False)):
-            out_img = self._apply_match_colors(out_img, self.pp.image)
-        out_img = self._apply_clahe(out_img)
-        out_img = self._apply_unsharp(out_img)
-    
+        # Post-FX with configurable order
+        order = self.config.get("postfx_order") or ["Match colors", "CLAHE", "Unsharp"]
+        for fx in order:
+            if fx == "Match colors":
+                out_img = self._apply_match_colors(out_img, self.pp.image)
+            elif fx == "CLAHE":
+                out_img = self._apply_clahe(out_img)
+            elif fx == "Unsharp":
+                out_img = self._apply_unsharp(out_img)
+            elif fx == "Sharpen (median)":
+                out_img = self._apply_sharpen_median(out_img)
+            elif fx == "Bilateral smooth":
+                out_img = self._apply_bilateral_smooth(out_img)
+
         return out_img
     
     def _final_upscale_tiled(self, img: Image.Image, scale: float) -> Image.Image:
@@ -2944,6 +3046,14 @@ def parse_infotext(infotext, params):
         data.setdefault("unsharp_radius", 1.5)
         data.setdefault("unsharp_amount", 0.75)
         data.setdefault("unsharp_threshold", 0)
+        data.setdefault("median_enabled", False)
+        data.setdefault("median_radius", 3)
+        data.setdefault("median_amount", 0.5)
+        data.setdefault("bilateral_enabled", False)
+        data.setdefault("bilateral_diameter", 5)
+        data.setdefault("bilateral_sigma_color", 75)
+        data.setdefault("bilateral_sigma_space", 75)
+        data.setdefault("postfx_order", ["Match colors", "CLAHE", "Unsharp"])
         data.setdefault("second_pass_prompt", "")
         data.setdefault("second_pass_prompt_append", True)
         data.setdefault("cn_proc_res_cap", 1024)
@@ -2975,7 +3085,8 @@ def parse_infotext(infotext, params):
         data.setdefault("adaptive_sigma_enable", False)
         data.setdefault("restore_scheduler_after", True)
         data.setdefault("latent_resample_enable", True)
-        data.setdefault("latent_resample_mode", "nearest")
+        data.setdefault("latent_resample_mode_first", data.get("latent_resample_mode", "nearest"))
+        data.setdefault("latent_resample_mode_second", data.get("latent_resample_mode", "nearest"))
         data.setdefault("noise_schedule_mode", "Use sampler default")
 
         # безопасные дефолты для старых инфотекстов
