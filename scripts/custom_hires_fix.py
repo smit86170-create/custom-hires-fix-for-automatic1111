@@ -14,7 +14,8 @@ from PIL import Image, ImageFilter
 from modules import scripts, shared, processing, sd_schedulers, sd_samplers, sd_samplers_common, script_callbacks, rng
 from contextlib import contextmanager, nullcontext
 from modules import images, devices, prompt_parser, sd_models, extra_networks
-from typing import Optional
+
+from logging_utils import logger
 
 # Ensure we call the upscaler path when resizing (A1111 compat)
 # --- Compatibility notes ---
@@ -28,23 +29,24 @@ from typing import Optional
 
 RESIZE_WITH_UPSCALER = getattr(images, "RESIZE_WITH_UPSCALER", None)
 if RESIZE_WITH_UPSCALER is None:
-    print("[Custom Hires Fix] Warning: images.RESIZE_WITH_UPSCALER not found; using fallback value 2. Please update Automatic1111 WebUI to a recent version.")
+    logger.warning("images.RESIZE_WITH_UPSCALER not found; using fallback value 2. Please update Automatic1111 WebUI to a recent version.")
     RESIZE_WITH_UPSCALER = 2
 
 # Optional deps (best-effort)
-def _safe_import(modname, pipname=None):
+def _safe_import(modname: str, pipname: str | None = None) -> bool:
     try:
         __import__(modname)
         return True
     except Exception as e:
-        print(f"[Custom Hires Fix] Warning: {e}")
+        hint = f" (pip install {pipname or modname})" if pipname else ""
+        logger.warning(f"{modname} import failed: {e}{hint}")
         return False
 
-_safe_import("omegaconf")
-_safe_import("kornia")
+_safe_import("omegaconf", "omegaconf")
+_safe_import("kornia", "kornia")
 _safe_import("k_diffusion", "k-diffusion")
-_safe_import("skimage")
-_safe_import("cv2")
+_safe_import("skimage", "scikit-image")
+_safe_import("cv2", "opencv-python")
 
 try:
     from omegaconf import OmegaConf, DictConfig  # type: ignore
@@ -62,7 +64,7 @@ try:
     import kornia  # type: ignore
     _HAS_KORNIA = True
 except Exception as e:
-    print(f"[Custom Hires Fix] Warning: {e}")
+    logger.warning(e)
     kornia = None
     _HAS_KORNIA = False
 
@@ -70,7 +72,7 @@ try:
     import k_diffusion as K  # type: ignore
     _HAS_KDIFF = True
 except Exception as e:
-    print(f"[Custom Hires Fix] Warning: {e}")
+    logger.warning(e)
     _HAS_KDIFF = False
 
     class _KStub:
@@ -159,7 +161,7 @@ try:
     from skimage import color as skcolor  # type: ignore
     _SKIMAGE_OK = True
 except Exception as e:
-    print(f"[Custom Hires Fix] Warning: {e}")
+    logger.warning(e)
     _SKIMAGE_OK = False
 
 # OpenCV (optional)
@@ -167,7 +169,7 @@ try:
     import cv2  # type: ignore
     _CV2_OK = True
 except Exception as e:
-    print(f"[Custom Hires Fix] Warning: {e}")
+    logger.warning(e)
     _CV2_OK = False
 
 QUOTE_SINGLE_TO_DOUBLE = {ord("'"): ord('"')}
@@ -232,7 +234,7 @@ class CustomHiresFix(scripts.Script):
             except Exception:
                 pass
 
-            print(f"[Custom Hires Fix] _interp fallback: {e}")
+            logger.warning(f"_interp fallback: {e}")
             try:
                 return args[0]  # мягкий фолбэк без ресайза
             except Exception:
@@ -265,7 +267,7 @@ class CustomHiresFix(scripts.Script):
             try:
                 self.config: DictConfig = OmegaConf.load(str(config_path)) or OmegaConf.create({})  # type: ignore
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 self.config = OmegaConf.create({})  # type: ignore
         else:
             self.config = OmegaConf.create({})  # type: ignore
@@ -338,20 +340,20 @@ class CustomHiresFix(scripts.Script):
                         if val:
                             parts.append(str(val))
         except Exception as e:
-            print(f"[Custom Hires Fix] fingerprint build warning: {e}")
+            logger.warning(f"fingerprint build warning: {e}")
         try:
             cs = getattr(getattr(shared, "opts", None), "CLIP_stop_at_last_layers", None)
             if cs is not None:
                 parts.append(f"clip_skip={cs}")
         except Exception as e:
-            print(f"[Custom Hires Fix] fingerprint clip_skip warning: {e}")
+            logger.warning(f"fingerprint clip_skip warning: {e}")
         if not parts:
             return None
         try:
             import hashlib as _hl
             return _hl.md5("|".join(parts).encode("utf-8")).hexdigest()
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             return "|".join(parts)
 
     def _clear_runtime_caches(self):
@@ -361,9 +363,9 @@ class CustomHiresFix(scripts.Script):
                 self._cond_cache.clear()
             if hasattr(self, "_noise_cache"):
                 self._noise_cache.clear()
-            print("[Custom Hires Fix] Runtime caches cleared.")
+            logger.info("Runtime caches cleared.")
         except Exception as e:
-            print(f"[Custom Hires Fix] cache clear warning: {e}")
+            logger.warning(f"cache clear warning: {e}")
 
     def _maybe_reset_caches(self):
         """Reset caches on model change."""
@@ -373,7 +375,7 @@ class CustomHiresFix(scripts.Script):
         if getattr(self, "_last_cache_fp", None) != fp:
             self._clear_runtime_caches()
             self._last_cache_fp = fp
-            print("[Custom Hires Fix] Model change detected -> caches reset.")
+            logger.info("Model change detected -> caches reset.")
 
 
 
@@ -387,7 +389,7 @@ class CustomHiresFix(scripts.Script):
             except TypeError:
                 r = float(ratio_fn())
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 r = 0.0
         if halve:
             r = r / 2.0
@@ -396,7 +398,7 @@ class CustomHiresFix(scripts.Script):
             model = getattr(self.p, "sd_model", None) or shared.sd_model
             sd_models.apply_token_merging(model, r)
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             pass
 
     def _set_scheduler_by_label(self, label_or_obj):
@@ -417,11 +419,11 @@ class CustomHiresFix(scripts.Script):
         try:
             self.p.scheduler = label
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             try:
                 setattr(self.p, "scheduler", label)
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
     def _coerce_scheduler_to_string(self):
         """
@@ -435,7 +437,7 @@ class CustomHiresFix(scripts.Script):
                 if isinstance(label, str) and label:
                     self.p.scheduler = label
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             pass
 
 
@@ -963,7 +965,7 @@ class CustomHiresFix(scripts.Script):
             try:
                 return d["Custom Hires Fix"].get(key, default)
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 return default
 
         self.infotext_fields = [
@@ -1153,7 +1155,7 @@ class CustomHiresFix(scripts.Script):
                 self._cn_ext = __import__(mod, fromlist=["external_code"])
                 break
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 continue
         if self._cn_ext:
             try:
@@ -1161,7 +1163,7 @@ class CustomHiresFix(scripts.Script):
                 self._cn_units = list(units) if units else []
                 self._use_cn = len(self._cn_units) > 0
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 self._use_cn = False
             # Post-detection notice
             try:
@@ -1170,9 +1172,9 @@ class CustomHiresFix(scripts.Script):
                     if isinstance(k, str) and k.startswith("cn_") and bool(v):
                         cn_flags.append(k)
                 if (cn_flags or bool(self.config.get("cn_ref", False))) and not self._use_cn:
-                    print("[Custom Hires Fix] ControlNet not detected, but CN-related options are set:", cn_flags or ["cn_ref"])
+                    logger.warning(f"ControlNet not detected, but CN-related options are set: {cn_flags or ['cn_ref']}")
             except Exception as e:
-                print(f"[Custom Hires Fix] ControlNet warning logic failed: {e}")
+                logger.warning(f"ControlNet warning logic failed: {e}")
 
 
     # Log settings into PNG-info (single JSON block)
@@ -1435,18 +1437,25 @@ class CustomHiresFix(scripts.Script):
                bool(self.config.get("cleanup_noise_overrides", True)):
                 self.p.sampler_noise_scheduler_override = None
         except Exception as _e:
-            print(f"[Custom Hires Fix] Warning: {_e}")
+            logger.warning(_e)
         # Обновить PNG-info уже с актуальным self.config
         p.extra_generation_params["Custom Hires Fix"] = self.create_infotext(p)
 
         # Короткий сводный лог запуска — удобно для багрепортов
         try:
-            size_mode = "MP" if self.config["mp_target_enabled"] else ("long_edge" if self.config["long_edge"] else ("ratio" if self.config["ratio"] else "WxH"))
-            print(f"[Custom Hires Fix] Run | size={size_mode} | steps={self.config['steps_first']}/{self.config['steps_second']} | "
-                  f"samplers={self.config.get('sampler_first')}/{self.config.get('sampler_second')} | "
-                  f"schedulers={self.config.get('scheduler_first')}/{self.config.get('scheduler_second')} | "
-                  f"final_upscale={self.config['final_upscale_enable']}×{self.config['final_scale']}")
-        except Exception: pass
+            size_mode = (
+                "MP" if self.config["mp_target_enabled"] else
+                ("long_edge" if self.config["long_edge"] else
+                 ("ratio" if self.config["ratio"] else "WxH"))
+            )
+            logger.info(
+                f"Run | size={size_mode} | steps={self.config['steps_first']}/{self.config['steps_second']} | "
+                f"samplers={self.config.get('sampler_first')}/{self.config.get('sampler_second')} | "
+                f"schedulers={self.config.get('scheduler_first')}/{self.config.get('scheduler_second')} | "
+                f"final_upscale={self.config['final_upscale_enable']}×{self.config['final_scale']}"
+            )
+        except Exception:
+            pass
 
         # Validate sizing:
         # Если MP target выключен и long_edge=0 — строго ДВА режима:
@@ -1476,7 +1485,7 @@ class CustomHiresFix(scripts.Script):
                         h = w
                     changed = True
                 if changed:
-                    print("[Custom Hires Fix] Sizing inputs normalized (auto-fix applied).")
+                    logger.info("Sizing inputs normalized (auto-fix applied).")
                     self.config["width"] = int(w)
                     self.config["height"] = int(h)
                     self.config["ratio"] = float(r)
@@ -1487,7 +1496,7 @@ class CustomHiresFix(scripts.Script):
                     self.config["height"] = 0
                     self.config["ratio"] = 1.0
                     width, height, ratio = 0, 0, 1.0
-                    print("[Custom Hires Fix] Sizing inputs defaulted to ratio=1.0 (auto-fix).")
+                    logger.info("Sizing inputs defaulted to ratio=1.0 (auto-fix).")
 
         # Track extras activated during conditioning
         self._activated_extras = []
@@ -1515,7 +1524,7 @@ class CustomHiresFix(scripts.Script):
                 if hasattr(self.p, "tile_overlap"):
                     self.p.tile_overlap = int(self.config.get("tile_overlap", 12))
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
         try:
             with devices.autocast():
@@ -1544,7 +1553,7 @@ class CustomHiresFix(scripts.Script):
                 if bool(self.config.get("restore_scheduler_after", True)) and getattr(self, "_orig_scheduler", None) is not None:
                     self.p.scheduler = self._orig_scheduler
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
             finally:
                 self._orig_scheduler = None
@@ -1556,13 +1565,13 @@ class CustomHiresFix(scripts.Script):
                     if hasattr(self.p, "tile_overlap") and self._orig_tile_overlap is not None:
                         self.p.tile_overlap = self._orig_tile_overlap
                 except Exception as e:
-                    print(f"[Custom Hires Fix] Warning: {e}")
+                    logger.warning(e)
                     pass
             try:
                 if getattr(self, "_orig_batch_size", None) is not None:
                     self.p.batch_size = self._orig_batch_size
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
             try:
                 # Deactivate any extras we activated during conditioning
@@ -1570,7 +1579,7 @@ class CustomHiresFix(scripts.Script):
                     try:
                         extra_networks.deactivate(self.p, _extra)
                     except Exception as e:
-                        print(f"[Custom Hires Fix] Warning: {e}")
+                        logger.warning(e)
                         pass
             finally:
                 self._activated_extras = []
@@ -1580,7 +1589,7 @@ class CustomHiresFix(scripts.Script):
                    bool(self.config.get("cleanup_noise_overrides", True)):
                     self.p.sampler_noise_scheduler_override = None
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
             # Восстановить исходные размеры после возможного _enable_controlnet
             try:
@@ -1590,7 +1599,7 @@ class CustomHiresFix(scripts.Script):
                 if oh is not None:
                     self.p.height = oh
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
             self._orig_size = (None, None)
 
@@ -1600,15 +1609,15 @@ class CustomHiresFix(scripts.Script):
         try:
             config_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: cannot create config dir: {e}")
+            logger.warning(f"cannot create config dir: {e}")
         saved = False
         try:
             from omegaconf import OmegaConf as _OC
             _OC.save(self.config, str(config_path))
-            print(f"[Custom Hires Fix] Config saved to YAML: {config_path}")
+            logger.info(f"Config saved to YAML: {config_path}")
             saved = True
         except Exception as e:
-            print(f"[Custom Hires Fix] YAML save failed: {e}")
+            logger.warning(f"YAML save failed: {e}")
         if not saved:
             try:
                 import json as _json
@@ -1617,17 +1626,17 @@ class CustomHiresFix(scripts.Script):
                     from omegaconf import OmegaConf as _OC2
                     data = _OC2.to_container(self.config, resolve=True)
                 except Exception as e:
-                    print(f"[Custom Hires Fix] Warning: {e}")
+                    logger.warning(e)
                     try:
                         data = dict(self.config)
                     except Exception as e:
-                        print(f"[Custom Hires Fix] Warning: {e}")
+                        logger.warning(e)
                         data = {}
                 with open(json_path, "w", encoding="utf-8") as f:
                     _json.dump(data, f, ensure_ascii=False, indent=2)
-                print(f"[Custom Hires Fix] Config saved to JSON: {json_path}")
+                logger.info(f"Config saved to JSON: {json_path}")
             except Exception as e:
-                print(f"[Custom Hires Fix] Config save failed: {e}")
+                logger.warning(f"Config save failed: {e}")
 
 
     def _vae_down_factor(self) -> int:
@@ -1636,7 +1645,7 @@ class CustomHiresFix(scripts.Script):
             f = getattr(getattr(shared.sd_model, "first_stage_model", None), "downsample_factor", None)
             return int(f) if f else 8
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             return 8
 
     # ---- Helpers ----
@@ -1658,12 +1667,12 @@ class CustomHiresFix(scripts.Script):
         try:
             base = float(self.config.get(base_key, 0.5))
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             base = 0.5
         try:
             off = float(self.config.get("denoise_offset", 0.0))
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             off = 0.0
         val = max(0.0, min(1.0, base + off))
         return val
@@ -1702,7 +1711,7 @@ class CustomHiresFix(scripts.Script):
                     elif any(k in text for k in ("sdxl", "sd-xl", "xl-refiner", "refiner-xl")):
                         flavor = "sdxl"; is_xl_like = True
         except Exception as e:
-            print(f"[Custom Hires Fix] model detection warning: {e}")
+            logger.warning(f"model detection warning: {e}")
         self._model_flavor = flavor
         return bool(is_xl_like)
     def _maybe_apply_sdxl_denoise_boost(self):
@@ -1715,7 +1724,7 @@ class CustomHiresFix(scripts.Script):
                 boost = float(self.config.get("sdxl_denoise_boost", 0.1))
                 self.p.denoising_strength = float(min(1.0, max(0.0, self.p.denoising_strength + boost)))
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             pass
     
     
@@ -1726,7 +1735,7 @@ class CustomHiresFix(scripts.Script):
             self.is_sdxl = self._detect_is_sdxl()
             return h or str(id(shared.sd_model))
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             return str(id(shared.sd_model))
     
     def _cond_key(self, width, height, steps_for_cond, prompt: str, negative: str, clip_skip: int):
@@ -1772,7 +1781,7 @@ class CustomHiresFix(scripts.Script):
                 if not enabled and hasattr(vae, "disable_tiling"):
                     vae.disable_tiling()
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
     
     def _restore_vae_tiling(self):
@@ -1786,7 +1795,7 @@ class CustomHiresFix(scripts.Script):
                 elif not self._orig_opt_vae_tiling and hasattr(vae, "disable_tiling"):
                     vae.disable_tiling()
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
         self._orig_opt_vae_tiling = None
 
@@ -1796,7 +1805,7 @@ class CustomHiresFix(scripts.Script):
         try:
             return images.resize_image(RESIZE_WITH_UPSCALER, img, int(w), int(h), upscaler_name=upscaler_name)
         except Exception as e:
-            print(f"[Custom Hires Fix] resize_image fallback ({upscaler_name}): {e}")
+            logger.warning(f"resize_image fallback ({upscaler_name}): {e}")
             try:
                 lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
                 return img.resize((int(w), int(h)), lanczos)
@@ -1838,7 +1847,7 @@ class CustomHiresFix(scripts.Script):
                     try:
                         cur = float(w)
                     except Exception as e:
-                        print(f"[Custom Hires Fix] LoRA weight parse warning for '{name}': {e}")
+                        logger.warning(f"LoRA weight parse warning for '{name}': {e}")
                         cur = 1.0
                     new_w = max(0.0, cur * float(factor))
                 return f"<lora:{name}:{new_w:.4g}>"
@@ -1846,7 +1855,7 @@ class CustomHiresFix(scripts.Script):
             try:
                 return lora_re.sub(_repl, text)
             except Exception as e:
-                print(f"[Custom Hires Fix] LoRA scaling failed: {e}")
+                logger.warning(f"LoRA scaling failed: {e}")
                 return text
     def _prepare_conditioning(self, width, height, steps_for_cond: int, prompt_override: str = None):
         """Build (cond, uncond) with optional LRU caching and LoRA scaling."""
@@ -1878,10 +1887,10 @@ class CustomHiresFix(scripts.Script):
                     try:
                         self._activated_extras.append(extra)
                     except Exception as e:
-                        print(f"[Custom Hires Fix] Warning: {e}")
+                        logger.warning(e)
                         pass
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
     
         if width and height and hasattr(prompt_parser, "SdConditioning"):
@@ -1923,17 +1932,17 @@ class CustomHiresFix(scripts.Script):
                 try:
                     setattr(s, "inner_sampler_name", inner)
                 except Exception as e:
-                    print(f"[Custom Hires Fix] Warning: {e}")
+                    logger.warning(e)
                     pass
                 return s
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
-                print(f"[Custom Hires Fix] Restart sampler not available; falling back to inner sampler: {inner}")
+                logger.warning(e)
+                logger.warning(f"Restart sampler not available; falling back to inner sampler: {inner}")
                 # fallback: напрямую создать указанный «внутренний» сэмплер
                 try:
                     return sd_samplers.create_sampler(inner, shared.sd_model)
                 except Exception as e:
-                    print(f"[Custom Hires Fix] Warning: {e}")
+                    logger.warning(e)
                     return sd_samplers.create_sampler("DPM++ 2M Karras", shared.sd_model)
         s = sd_samplers.create_sampler(sampler_name, shared.sd_model)
         # Жёсткая очистка возможного чужого override на сэмплере
@@ -1942,7 +1951,7 @@ class CustomHiresFix(scripts.Script):
                bool(self.config.get("cleanup_noise_overrides", True)):
                 s.noise_scheduler_override = None
         except Exception as _e:
-            print(f"[Custom Hires Fix] Warning: {_e}")
+            logger.warning(_e)
         return s
     
     def _apply_clahe(self, img: Image.Image) -> Image.Image:
@@ -2096,7 +2105,7 @@ class CustomHiresFix(scripts.Script):
                 try:
                     num_ddpm = model_wrap.inner_model.inner_model.num_timesteps
                 except Exception as e:
-                    print(f"[Custom Hires Fix] Warning: {e}")
+                    logger.warning(e)
                     num_ddpm = 1000
                 c = max(1, num_ddpm // max(1, n))
                 ddim_ts = np.asarray(list(range(0, num_ddpm, c)))
@@ -2140,7 +2149,7 @@ class CustomHiresFix(scripts.Script):
             fn = table.get(schedule_mode, None)
             return fn or _adaptive_builder()
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             # мягкий откат к адаптивной логике
             return _adaptive_builder()
 
@@ -2174,13 +2183,13 @@ class CustomHiresFix(scripts.Script):
                     # пробрасываем дальше — поймает сэмплер
                     raise
                 except Exception as e:
-                    print(f"[Custom Hires Fix] stop-hook callback warning: {e}")
+                    logger.warning(f"stop-hook callback warning: {e}")
                     return
 
             cb_ref = _cb
             script_callbacks.on_cfg_denoiser(cb_ref)
         except Exception as e:
-            print(f"[Custom Hires Fix] stop-hook install failed, fallback to clamp: {e}")
+            logger.warning(f"stop-hook install failed, fallback to clamp: {e}")
             cb_ref = None
         try:
             yield
@@ -2192,7 +2201,7 @@ class CustomHiresFix(scripts.Script):
                     if callable(remove):
                         remove(cb_ref)
                 except Exception as e:
-                    print(f"[Custom Hires Fix] stop-hook remove warning: {e}")
+                    logger.warning(f"stop-hook remove warning: {e}")
 
     def _first_pass(self, x: Image.Image) -> Image.Image:
         # Determine target size
@@ -2234,7 +2243,7 @@ class CustomHiresFix(scripts.Script):
                 cn_np = np.array(x.resize((self.width, self.height)))
                 self._enable_controlnet(cn_np)
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
     
         # Build override prompt for first pass (none; base prompt)
@@ -2301,7 +2310,7 @@ class CustomHiresFix(scripts.Script):
         try:
             key_seed = (self.p.seeds[0] if getattr(self.p, "seeds", None) else getattr(self.p, "seed", None))
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             key_seed = None
         use_cache = bool(self.config.get("reuse_noise_cache", True))
         sam_name = str(self.config.get("sampler_first", self.config.get("sampler", "")))
@@ -2346,7 +2355,8 @@ class CustomHiresFix(scripts.Script):
             if hasattr(sampler, "noise_scheduler_override") and \
                bool(self.config.get("cleanup_noise_overrides", True)):
                 sampler.noise_scheduler_override = None
-        except Exception as _e: print(f"[Custom Hires Fix] Warning: {_e}")
+        except Exception as _e:
+            logger.warning(_e)
 
 
         # NEW: если у сэмплера есть поле для оверрайда, выставим и туда
@@ -2354,7 +2364,7 @@ class CustomHiresFix(scripts.Script):
             if fn_sched_override is not None and hasattr(sampler, "noise_scheduler_override"):
                 sampler.noise_scheduler_override = fn_sched_override
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
 
         # Stop-at-step — режим hook & interrupt
         if smode == "Hook & interrupt (Anti-Burn style)" and sfirst > 0:
@@ -2426,7 +2436,7 @@ class CustomHiresFix(scripts.Script):
             try:
                 self._enable_controlnet(np.array(cn_img.resize((w, h))))
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
     
         # Build override prompt for second pass
@@ -2483,7 +2493,7 @@ class CustomHiresFix(scripts.Script):
                 self.p.seed_resize_from_h = self._saved_seed_resize_from_h if self._saved_seed_resize_from_h is not None else self.p.seed_resize_from_h
                 self.p.seed_resize_from_w = self._saved_seed_resize_from_w if self._saved_seed_resize_from_w is not None else self.p.seed_resize_from_w
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 pass
     
         self.p.rng = rng.ImageRNG(sample.shape[1:], self.p.seeds, subseeds=self.p.subseeds,
@@ -2514,7 +2524,7 @@ class CustomHiresFix(scripts.Script):
                 try:
                     key_seed = (self.p.seeds[0] if getattr(self.p, "seeds", None) else getattr(self.p, "seed", None))
                 except Exception as e:
-                    print(f"[Custom Hires Fix] Warning: {e}")
+                    logger.warning(e)
                     key_seed = None
                 use_cache = bool(self.config.get("reuse_noise_cache", True))
                 sam_name = str(self.config.get("sampler_second", self.config.get("sampler", "")))
@@ -2538,7 +2548,7 @@ class CustomHiresFix(scripts.Script):
             try:
                 key_seed = (self.p.seeds[0] if getattr(self.p, "seeds", None) else getattr(self.p, "seed", None))
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 key_seed = None
             use_cache = bool(self.config.get("reuse_noise_cache", True))
             sam_name = str(self.config.get("sampler_second", self.config.get("sampler", "")))
@@ -2575,7 +2585,8 @@ class CustomHiresFix(scripts.Script):
             if hasattr(sampler, "noise_scheduler_override") and \
                bool(self.config.get("cleanup_noise_overrides", True)):
                 sampler.noise_scheduler_override = None
-        except Exception as _e: print(f"[Custom Hires Fix] Warning: {_e}")
+        except Exception as _e:
+            logger.warning(_e)
 
 
         # NEW: зеркально — если поддерживается, прописать прямо на сэмплер
@@ -2583,7 +2594,7 @@ class CustomHiresFix(scripts.Script):
             if fn_sched_override is not None and hasattr(sampler, "noise_scheduler_override"):
                 sampler.noise_scheduler_override = fn_sched_override
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
 
         # Stop-at-step — режим hook & interrupt
         if smode == "Hook & interrupt (Anti-Burn style)" and ssecond > 0:
@@ -2729,7 +2740,9 @@ class CustomHiresFix(scripts.Script):
         if budget is None:
             budget = int(1.5 * 1024 ** 3)
         if mem_est_bytes > budget:
-            print(f"[Custom Hires Fix] Final upscale tiling: estimated {mem_est_bytes/1024/1024/1024:.2f} GB; falling back to single-pass resize.")
+            logger.info(
+                f"Final upscale tiling: estimated {mem_est_bytes/1024/1024/1024:.2f} GB; falling back to single-pass resize."
+            )
             try:
                 return self._resize_with_upscaler(img, TW, TH, upscaler_name)
             except Exception:
@@ -2841,7 +2854,7 @@ class CustomHiresFix(scripts.Script):
                 self.p.width = image_np.shape[1]
                 self.p.height = image_np.shape[0]
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 continue
         try:
             self._cn_ext.update_cn_script_in_processing(self.p, self._cn_units)
@@ -2849,7 +2862,7 @@ class CustomHiresFix(scripts.Script):
                 if script.title().lower() == "controlnet":
                     script.controlnet_hack(self.p)
         except Exception as e:
-            print(f"[Custom Hires Fix] Warning: {e}")
+            logger.warning(e)
             pass
     
     
@@ -2884,7 +2897,7 @@ def parse_infotext(infotext, params):
             try:
                 r = float(scale)
             except Exception as e:
-                print(f"[Custom Hires Fix] Warning: {e}")
+                logger.warning(e)
                 r = 0.0
             data["ratio"] = r
             data["width"] = int(data.get("width", 0) or 0)
@@ -2983,9 +2996,9 @@ def parse_infotext(infotext, params):
         data.setdefault("start_control_at", 0.0)
         data.setdefault("final_blend_window", "hann")
         data.setdefault("final_reflect_pad", True)
-        
+
     except Exception as e:
-        print(f"[Custom Hires Fix] Warning: {e}")
+        logger.warning(e)
         return
 # Register paste-params hook (guard against double registration)
 try:
