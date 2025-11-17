@@ -17,6 +17,8 @@ from modules import images, devices, prompt_parser, sd_models, extra_networks
 
 from logging_utils import logger
 
+_INFOTEXT_HOOK_REGISTERED = False  # Guard for callback registration
+
 # Ensure we call the upscaler path when resizing (A1111 compat)
 # --- Compatibility notes ---
 # Recommended runtime:
@@ -1717,13 +1719,18 @@ class CustomHiresFix(scripts.Script):
     # ---- Helpers ----
     def _maybe_mp_resize(self, base_w, base_h, target_mp: float):
         """Compute size from megapixels while keeping aspect ratio; quantize to multiple of 8."""
-        aspect = base_w / base_h if base_h else 1.0
+        if base_h <= 0 or base_w <= 0:
+            logger.warning(f"Invalid base dimensions: {base_w}x{base_h}")
+            return 512, 512  # Safe fallback
+        
+        aspect = base_w / base_h
         total_px = max(0.01, target_mp) * 1_000_000.0
         w_float = math.sqrt(total_px * aspect)
         h_float = w_float / aspect
         w = max(8, int(round(w_float / 8) * 8))
         h = max(8, int(round(h_float / 8) * 8))
         return w, h
+
 
     def _compute_denoise(self, base_key: str) -> float:
         """
@@ -1806,9 +1813,10 @@ class CustomHiresFix(scripts.Script):
     
     def _cond_key(self, width, height, steps_for_cond, prompt: str, negative: str, clip_skip: int):
         h = hashlib.sha256()
-        h.update((prompt or "").encode("utf-8"))
+        # Безопасная обработка None
+        h.update((prompt or "").encode("utf-8", errors="replace"))
         h.update(b"::")
-        h.update((negative or "").encode("utf-8"))
+        h.update((negative or "").encode("utf-8", errors="replace"))
         # NEW: учитываем семейство модели (SDXL/SD3) в ключе кэша
         xl_flag = int(bool(self.config.get("sdxl_mode", False)) or self.is_sdxl)
         key = f"{self._model_hash_for_cache()}|xl={xl_flag}|{width}x{height}|{steps_for_cond}|cs={clip_skip}|{h.hexdigest()}"
@@ -2403,7 +2411,13 @@ class CustomHiresFix(scripts.Script):
             steps = min(steps, sfirst)
         # NEW: LRU-кэш шума для первой стадии
         try:
-            key_seed = (self.p.seeds[0] if getattr(self.p, "seeds", None) else getattr(self.p, "seed", None))
+             try:
+                 seeds = getattr(self.p, "seeds", None)
+                 key_seed = seeds[0] if (seeds and len(seeds) > 0) else getattr(self.p, "seed", None)
+             except (IndexError, TypeError, AttributeError) as e:
+                 logger.warning(f"Seed extraction warning: {e}")
+                 key_seed = None
+
         except Exception as e:
             logger.warning(e)
             key_seed = None
@@ -2617,7 +2631,12 @@ class CustomHiresFix(scripts.Script):
             else:
                 # NEW: если размеры не совпали — попробуем кэш
                 try:
-                    key_seed = (self.p.seeds[0] if getattr(self.p, "seeds", None) else getattr(self.p, "seed", None))
+                     try:
+                         seeds = getattr(self.p, "seeds", None)
+                         key_seed = seeds[0] if (seeds and len(seeds) > 0) else getattr(self.p, "seed", None)
+                     except (IndexError, TypeError, AttributeError) as e:
+                         logger.warning(f"Seed extraction warning: {e}")
+                         key_seed = None
                 except Exception as e:
                     logger.warning(e)
                     key_seed = None
@@ -2641,7 +2660,12 @@ class CustomHiresFix(scripts.Script):
         else:
             # NEW: обычный путь — используем LRU-кэш
             try:
-                key_seed = (self.p.seeds[0] if getattr(self.p, "seeds", None) else getattr(self.p, "seed", None))
+                try:
+                    seeds = getattr(self.p, "seeds", None)
+                    key_seed = seeds[0] if (seeds and len(seeds) > 0) else getattr(self.p, "seed", None)
+                except (IndexError, TypeError, AttributeError) as e:
+                    logger.warning(f"Seed extraction warning: {e}")
+                    key_seed = None
             except Exception as e:
                 logger.warning(e)
                 key_seed = None
@@ -2971,19 +2995,24 @@ class CustomHiresFix(scripts.Script):
 def parse_infotext(infotext, params):
     try:
         block = params.get("Custom Hires Fix")
-        if block is None:   # <-- было: if not block
+        if block is None:
             return
-        # поддержка нового формата "json64:<base64(json)>", а также обратная совместимость
-        if isinstance(block, str) and block.startswith("json64:"):
-            data = json.loads(base64.b64decode(block[7:]).decode("utf-8"))
-        elif isinstance(block, str):
-            try:
-                data = json.loads(block)  # сначала пробуем валидный JSON
-            except json.JSONDecodeError:
-                # фолбэк для старых строк с одинарными кавычками
-                data = json.loads(block.translate(QUOTE_SINGLE_TO_DOUBLE))
-        else:
+        
+        # Парсинг с явной обработкой форматов
+        if isinstance(block, dict):
             data = block
+        elif isinstance(block, str):
+            if block.startswith("json64:"):
+                data = json.loads(base64.b64decode(block[7:]).decode("utf-8"))
+            else:
+                try:
+                    data = json.loads(block)
+                except json.JSONDecodeError:
+                    # Fallback для старых строк с одинарными кавычками
+                    data = json.loads(block.translate(QUOTE_SINGLE_TO_DOUBLE))
+        else:
+            logger.warning(f"Unexpected infotext type: {type(block)}")
+            return
         params["Custom Hires Fix"] = data
         scale = data.get("scale", 0)
         scale_str = str(scale).lower()
